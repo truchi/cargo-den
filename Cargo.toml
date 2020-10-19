@@ -1,0 +1,13 @@
+[package]
+name = "cargo-den"
+version = "0.1.0"
+authors = ["Romain TRUCHI <romain.truchi.06@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+libloading = "0.6"
+proc-macro2 = "1.0"
+ignore = "0.4"
+
+[dev-dependencies]
+pretty_assertions = "0.6.1"
