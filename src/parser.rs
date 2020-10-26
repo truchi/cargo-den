@@ -1,223 +1,302 @@
-#[derive(Copy, Clone, Eq, PartialEq, Default, Debug)]
-struct Block<'a> {
-    name:       &'a str,
-    call:       usize,
-    attributes: Option<usize>,
-    items:      Option<usize>,
-    start:      usize,
-    end:        Option<usize>,
-}
-
-impl<'a> Block<'a> {
-    fn new(name: &'a str, call: usize) -> Self {
-        Self {
-            name,
-            call,
-            attributes: None,
-            items: None,
-            start: call + 1,
-            end: None,
-        }
-    }
-
-    fn attribute(&mut self, attribute: usize) {
-        self.attributes = self.attributes.or(Some(attribute));
-        self.start = attribute + 1;
-    }
-
-    fn item(&mut self, item: usize) {
-        self.items = self.items.or(Some(item));
-        self.start = item + 1;
-    }
-
-    fn start(&mut self, start: usize) {
-        self.start = start;
-    }
-
-    fn end(&mut self, end: usize) {
-        self.end = Some(end);
-    }
-}
+use super::{
+    block::{Block, BlockError},
+    matcher::{Find, Matcher},
+};
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum State {
-    Call,
-    Attribute,
-    Item,
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum Warning {
-    SoloStart(usize),
-    SoloEnd(usize),
-    CallNotBegin(usize),
-    NoBang(usize),
-}
-
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-enum Error {
-    MissingOpen(usize),
-    MissingClose(usize),
+pub enum Warning {
+    UnexpectedStart(usize),
+    UnexpectedEnd(usize),
+    CallNoBang(usize),
+    EndNoBang(usize),
+    NameMismatch(usize),
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct Parser<'a> {
     content:  &'a str,
-    state:    State,
     blocks:   Vec<Block<'a>>,
     warnings: Vec<Warning>,
-    errors:   Vec<Error>,
 }
 
 impl<'a> Parser<'a> {
-    const ATTRIBUTE: &'static str = "//";
-    const CALL: &'static str = "// @den::";
-    const END: &'static str = "// ```@den```";
-    const START: &'static str = "// ```@den``` end: ";
-
     pub fn new(content: &'a str) -> Self {
         Self {
             content,
-            state: State::Call,
             blocks: vec![],
             warnings: vec![],
-            errors: vec![],
         }
     }
 
-    // pub fn parse2(&mut self, content: &'a str) {
-    // for line in content.lines().enumerate() {
-    // match self.state {
-    // State::Call => {}
-    // State::Attribute => {}
-    // State::Item => {}
-    // }
-    // }
-    // }
-
-    pub fn parse(&mut self) {
-        for line in self.content.lines().enumerate() {
-            self.parse_line(line);
-        }
-    }
-
-    fn parse_line(&mut self, (i, line): (usize, &'a str)) {
-        match self.state {
-            State::Call => {
-                if let Some(_) = line.find(Self::START) {
-                    self.warnings.push(Warning::SoloStart(i));
-                    return;
-                }
-
-                if let Some(_) = line.find(Self::END) {
-                    // self.blocks.last_mut().expect("No blocks").end(i);
+    pub fn parse(mut self) -> Result<Self, (BlockError, Block<'a>, Option<usize>)> {
+        for (i, line) in self.content.lines().enumerate() {
+            match Matcher::find(line) {
+                Find::Empty => {}
+                Find::CallNoBang => self.warnings.push(Warning::CallNoBang(i)),
+                Find::EndNoBang => self.warnings.push(Warning::EndNoBang(i)),
+                Find::Call(name) => {
+                    // Error if previous block is not in a valid state
                     if let Some(block) = self.blocks.last_mut() {
-                        // TODO matching names
-                        block.end(i);
-                    } else {
-                        self.warnings.push(Warning::SoloEnd(i));
+                        if let Err(error) = block.is_valid() {
+                            return Err((error, self.blocks.pop().unwrap(), Some(i)));
+                        }
                     }
-                    return;
-                }
 
-                let call = line.find(Self::CALL);
-                if call == None {
-                    return;
-                }
-
-                let call = call.unwrap();
-                for c in line[0..call].chars() {
-                    if !c.is_whitespace() {
-                        self.warnings.push(Warning::CallNotBegin(i));
-                        return;
-                    }
-                }
-
-                let name_i = call + Self::CALL.len();
-                if let Some(bang) = line[name_i..].find('!') {
-                    let name = &line[name_i..name_i + bang];
-
+                    // Append new block
                     self.blocks.push(Block::new(name, i));
-                    self.state = State::Attribute;
-                } else {
-                    self.warnings.push(Warning::NoBang(i));
                 }
+                Find::Attribute =>
+                // Set attribute line number on last block
+                    if let Some(block) = self.blocks.last_mut() {
+                        block.set_attribute(i);
+                    },
+                Find::Item =>
+                // Set item line number on last block
+                    if let Some(block) = self.blocks.last_mut() {
+                        block.set_item(i);
+                    },
+                Find::Start =>
+                // Set start line number on last block,
+                // or warn for execpected start tag
+                    if let Some(block) = self.blocks.last_mut() {
+                        if let Err(_) = block.set_start(i) {
+                            self.warnings.push(Warning::UnexpectedStart(i));
+                        }
+                    } else {
+                        self.warnings.push(Warning::UnexpectedStart(i));
+                    },
+                Find::End(name) =>
+                // Set end line number on last block,
+                // or warn for execpected end tag
+                    if let Some(block) = self.blocks.last_mut() {
+                        if let Err(_) = block.set_end(i) {
+                            self.warnings.push(Warning::UnexpectedEnd(i));
+                        } else if block.name != name {
+                            self.warnings.push(Warning::NameMismatch(i));
+                        }
+                    } else {
+                        self.warnings.push(Warning::UnexpectedEnd(i));
+                    },
             }
-            State::Attribute =>
-                if let Some(_) = line.find(Self::ATTRIBUTE) {
-                    self.blocks.last_mut().expect("No blocks").attribute(i);
-                } else {
-                    self.state = State::Item;
-                },
-            State::Item =>
-                if let Some(_) = line.find(Self::START) {
-                    self.blocks.last_mut().expect("No blocks").start(i);
-                    self.state = State::Call;
-                } else {
-                    self.blocks.last_mut().expect("No blocks").item(i);
-                },
         }
+
+        // Error if last block is not in a valid state
+        if let Some(block) = self.blocks.last_mut() {
+            if let Err(error) = block.is_valid() {
+                return Err((error, self.blocks.pop().unwrap(), None));
+            }
+        }
+
+        Ok(self)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::block::tests::block, *};
     use pretty_assertions::assert_eq;
 
-    macro_rules! parser {
+    macro_rules! assert_parser {
         (
-            $content:ident,
-            $state:ident,[
-                $(
-                    $name:literal,
-                    $call:literal,
-                    $attributes:expr,
-                    $items:expr,
-                    $start:literal,
-                    $end:expr
-                )*
-            ]
+            $fmt:literal, $content:literal,
+            [$((
+                $name:literal, $call:literal, $attributes:expr,
+                $items:expr, $start:expr, $output:expr, $end:expr
+            ))*]
+            $([$($warning:ident($i:literal))+])?
         ) => {
-            Parser {
-                content:  &$content,
-                state:    State::$state,
+            let content = $content;
+            let parser = Parser::new(content).parse();
+            let expected = Ok(Parser {
+                content:  content,
                 blocks:   vec![$(
-                    Block {
-                        name: $name,
-                        call: $call,
-                        attributes: $attributes,
-                        items: $items,
-                        start: $start,
-                        end: $end,
-                    }
+                    block($name, $call, $attributes, $items, $start, $output, $end),
                 )*],
-                warnings: vec![],
-                errors:   vec![],
-            }
+                warnings: vec![$($(Warning::$warning($i),)+)?],
+            });
+
+            assert_eq!(parser, expected, $fmt);
+        };
+        (
+            $fmt:expr, $content:literal, $error:ident (
+                $name:literal, $call:literal, $attributes:expr,
+                $items:expr, $start:expr, $output:expr, $end:expr
+            )
+            $i:expr
+        ) => {
+            let content = $content;
+            let parser = Parser::new(content).parse();
+            let expected = Err((
+                BlockError::$error,
+                block($name, $call, $attributes, $items, $start, $output, $end),
+                $i
+            ));
+
+            assert_eq!(parser, expected, $fmt);
         };
     }
 
     #[test]
-    fn test() {
-        let content = r#"
-        // @den::macro!
-        // ```@den```
-        "#;
-        let mut parser = Parser::new(content);
-        parser.parse();
-
-        assert_eq!(
-            parser,
-            parser!(content, Item, ["macro", 1, Some(2), None, 3, None])
+    fn call() {
+        assert_parser!(
+            "Bare macro call",
+            r#"
+                // @den::macro!
+            "#,
+            [("macro", 1, None, None, None, None, None)]
         );
 
-        // assert_eq!(parser, Parser {
-        // content:  &content,
-        // state:    State::Call,
-        // blocks:   vec![],
-        // warnings: vec![],
-        // errors:   vec![],
-        // });
+        assert_parser!(
+            "Macro call with start tag",
+            r#"
+                // @den::macro!
+                // ```@den```
+            "#,
+            [("macro", 1, None, None, Some(2), None, None)]
+        );
+
+        assert_parser!(
+            "Macro call with output",
+            r#"
+                // @den::macro!
+                // ```@den```
+                struct Output;
+                // ```@den``` end:macro!
+            "#,
+            [("macro", 1, None, None, Some(2), Some(3), Some(4))]
+        );
+    }
+
+    #[test]
+    fn attributes() {
+        assert_parser!(
+            "Macro with attributes",
+            r#"
+                // @den::macro!
+                // attrs
+                // attrs
+                // ```@den```
+            "#,
+            [("macro", 1, Some(2), None, Some(4), None, None)]
+        );
+
+        assert_parser!(
+            "Macro with attributes and output",
+            r#"
+                // @den::macro!
+                // attrs
+                // attrs
+                // ```@den```
+                struct Output;
+                // ```@den``` end:macro!
+            "#,
+            [("macro", 1, Some(2), None, Some(4), Some(5), Some(6))]
+        );
+    }
+
+    #[test]
+    fn items() {
+        assert_parser!(
+            "Macro with items",
+            r#"
+                // @den::macro!
+                struct Input1;
+                struct Input2;
+                // ```@den```
+            "#,
+            [("macro", 1, None, Some(2), Some(4), None, None)]
+        );
+
+        assert_parser!(
+            "Macro with items and output",
+            r#"
+                // @den::macro!
+                struct Input1;
+                struct Input2;
+                // ```@den```
+                struct Output1;
+                struct Output2;
+                // ```@den``` end:macro!
+            "#,
+            [("macro", 1, None, Some(2), Some(4), Some(5), Some(7))]
+        );
+    }
+
+    #[test]
+    fn attributes_and_items() {
+        assert_parser!(
+            "Macro with attributes and items",
+            r#"
+                // @den::macro!
+                // attrs
+                // attrs
+                fn input1() {}
+                fn input2() {}
+                // ```@den```
+            "#,
+            [("macro", 1, Some(2), Some(4), Some(6), None, None)]
+        );
+
+        assert_parser!(
+            "Macro with attributes, items and output",
+            r#"
+                // @den::macro!
+                // attrs
+                // attrs
+                fn input1() {}
+                fn input2() {}
+                // ```@den```
+                fn output1() {}
+                fn output2() {}
+                // ```@den``` end:macro!
+            "#,
+            [("macro", 1, Some(2), Some(4), Some(6), Some(7), Some(9))]
+        );
+    }
+
+    #[test]
+    fn missing_start() {
+        assert_parser!(
+            "Missing start with 1 call",
+            r#"
+                // @den::macro!
+                fn output1() {}
+            "#,
+            MissingStart("macro", 1, None, Some(2), None, None, None) None
+        );
+        assert_parser!(
+            "Missing start with 2 calls",
+            r#"
+                // @den::macro1!
+                fn output1() {}
+
+                // @den::macro2!
+            "#,
+            MissingStart("macro1", 1, None, Some(2), None, None, None) Some(4)
+        );
+    }
+
+    #[test]
+    fn missing_end() {
+        assert_parser!(
+            "Missing end with 1 call",
+            r#"
+                // @den::macro!
+                // ```@den```
+                fn output1() {}
+            "#,
+            MissingEnd("macro", 1, None, None, Some(2), Some(3), None) None
+        );
+        assert_parser!(
+            "Missing start with 2 calls",
+            r#"
+                // @den::macro1!
+                // ```@den```
+                fn output1() {}
+
+                // @den::macro2!
+            "#,
+            MissingEnd("macro1", 1, None, None, Some(2), Some(3), None) Some(5)
+        );
     }
 }

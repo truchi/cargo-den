@@ -1,3 +1,5 @@
+mod block;
+mod matcher;
 mod parser;
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
@@ -70,8 +72,7 @@ fn main() {
         println!("reading {:?}", path);
         let content = String::from_utf8(read(path).unwrap()).unwrap();
 
-        let mut parser = Parser::new(&content);
-        parser.parse();
+        let parser = Parser::new(&content).parse();
         println!("{:#?}", parser);
     }
 }
